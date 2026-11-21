@@ -137,6 +137,11 @@ export function ContactStage() {
       intro: !reduced,
       started: performance.now(),
       drag: false,
+      spring: false,
+      goal: CONTACT_REST_INDEX,
+      vel: 0,
+      swing: 0,
+      swingTarget: 0,
       gap: reduced ? gap : 0,
       focus: reduced ? 1 : 0,
       active: -1,
@@ -242,17 +247,44 @@ export function ContactStage() {
           motion.last = now - 1000;
         }
       } else if (!reduced) {
-        if (!motion.drag && now - motion.last > 140) {
-          const nearest = Math.round(motion.t);
-          const settle = 1 - (1 - 0.085) ** (dt * 60);
-          motion.t += (nearest - motion.t) * settle;
-          if (Math.abs(motion.t - nearest) < 0.0015) motion.t = nearest;
+        if (motion.spring && !motion.drag) {
+          const stiffness = 120;
+          const damping = 22;
+          motion.vel += ((motion.goal - motion.t) * stiffness - motion.vel * damping) * dt;
+          motion.t += motion.vel * dt;
+          motion.speed = Math.max(-0.35, Math.min(0.35, motion.vel * 0.08));
+          motion.swingTarget = Math.max(-0.07, Math.min(0.07, -motion.vel * 0.012));
+          if (Math.abs(motion.goal - motion.t) < 0.0015 && Math.abs(motion.vel) < 0.02) {
+            motion.t = motion.goal;
+            motion.vel = 0;
+            motion.speed = 0;
+            motion.swingTarget = 0;
+            motion.spring = false;
+          }
+          motion.c = motion.t;
+        } else {
+          if (!motion.drag && now - motion.last > 140) {
+            const nearest = Math.round(motion.t);
+            const settle = 1 - (1 - 0.085) ** (dt * 60);
+            motion.t += (nearest - motion.t) * settle;
+            if (Math.abs(motion.t - nearest) < 0.0015) motion.t = nearest;
+          }
+          if (motion.drag) {
+            motion.c = motion.t;
+            if (now - motion.last > 40) {
+              motion.speed *= 0.86 ** (dt * 60);
+              motion.swingTarget += (0 - motion.swingTarget) * (1 - Math.exp(-dt * 8));
+            }
+          } else {
+            const amount = 0.06;
+            motion.c += (motion.t - motion.c) * (1 - (1 - amount) ** (dt * 60));
+            motion.speed *= 0.86 ** (dt * 60);
+          }
         }
-        const amount = motion.drag ? 0.12 : 0.06;
-        motion.c += (motion.t - motion.c) * (1 - (1 - amount) ** (dt * 60));
-        motion.speed *= (motion.drag ? 0.72 : 0.86) ** (dt * 60);
+        motion.swing += (motion.swingTarget - motion.swing) * (1 - Math.exp(-dt * 16));
+        if (!motion.drag && !motion.spring && Math.abs(motion.swing) < 0.0008) motion.swing = 0;
       }
-      const center = deck.draw(scrollForMember(motion.c), motion.speed, motion.gap, motion.focus);
+      const center = deck.draw(scrollForMember(motion.c), motion.speed, motion.gap, motion.focus, reduced ? 0 : motion.swing);
       const active = ((Math.round(motion.c) % CONTACT_COUNT) + CONTACT_COUNT) % CONTACT_COUNT;
       setActive(active);
       const roll = ((motion.c % CONTACT_COUNT) + CONTACT_COUNT) % CONTACT_COUNT + CONTACT_COUNT;
@@ -295,19 +327,28 @@ export function ContactStage() {
       });
     };
 
-    const goTo = (index: number) => {
+    const reveal = () => {
       motion.intro = false;
       stage.querySelectorAll<HTMLElement>("[data-intro]").forEach((node) => {
         node.style.opacity = "1";
         node.style.translate = "none";
       });
-      motion.t = index;
-      motion.last = performance.now();
       motion.gap = gap;
       motion.focus = 1;
+    };
+
+    const goTo = (index: number) => {
+      reveal();
+      motion.drag = false;
+      motion.spring = false;
+      motion.vel = 0;
+      motion.speed = 0;
+      motion.swing = 0;
+      motion.swingTarget = 0;
+      motion.t = index;
+      motion.last = performance.now();
       if (reduced) {
         motion.c = index;
-        motion.speed = 0;
         paint(performance.now());
       }
     };
@@ -321,6 +362,8 @@ export function ContactStage() {
         return;
       }
       if (motion.intro) return;
+      motion.spring = false;
+      motion.swingTarget = 0;
       motion.t += event.deltaY / pixelsPerMember;
       motion.speed -= event.deltaY / pixelsPerMember;
       motion.last = performance.now();
@@ -330,37 +373,114 @@ export function ContactStage() {
         paint(performance.now());
       }
     };
-    let touchY = 0;
-    let touchVelocity = 0;
-    let touchAt = 0;
-    const onTouchStart = (event: TouchEvent) => {
-      if (motion.intro) return;
-      touchY = event.touches[0].clientY;
-      touchVelocity = 0;
-      touchAt = performance.now();
-      motion.drag = true;
-      motion.last = touchAt;
+    const canvas = stage.querySelector("canvas");
+    const deckEl = canvas?.parentElement;
+    const pointer = {
+      id: -1,
+      x: 0,
+      y: 0,
+      at: 0,
+      origin: CONTACT_REST_INDEX,
+      lock: "" as "" | "deck" | "scroll",
+      velocity: 0,
+      lastX: 0,
+      lastY: 0,
+      lastAt: 0,
     };
-    const onTouchMove = (event: TouchEvent) => {
-      if (motion.intro) return;
-      if (phone && list.contains(event.target as Node)) return;
+    const pointOf = (event: PointerEvent) => {
+      const rect = canvas?.getBoundingClientRect();
+      return { x: event.clientX - (rect?.left ?? 0), y: event.clientY - (rect?.top ?? 0) };
+    };
+    const onPointerDown = (event: PointerEvent) => {
+      if (!canvas || !deckEl || event.button !== 0) return;
+      const point = pointOf(event);
+      if (!deck.hit(point.x, point.y)) return;
+      reveal();
+      pointer.id = event.pointerId;
+      pointer.x = event.clientX;
+      pointer.y = event.clientY;
+      pointer.lastX = event.clientX;
+      pointer.lastY = event.clientY;
+      pointer.at = performance.now();
+      pointer.lastAt = pointer.at;
+      pointer.origin = motion.t;
+      pointer.lock = "";
+      pointer.velocity = 0;
+      motion.spring = false;
+      deckEl.dataset.grab = "hold";
+      canvas.setPointerCapture(event.pointerId);
+    };
+    const onPointerMove = (event: PointerEvent) => {
+      if (!canvas || !deckEl || event.pointerId !== pointer.id) return;
+      const travelX = event.clientX - pointer.x;
+      const travelY = event.clientY - pointer.y;
+      if (!pointer.lock) {
+        if (Math.hypot(travelX, travelY) < 6) return;
+        if (phone && Math.abs(travelY) > Math.abs(travelX)) {
+          pointer.lock = "scroll";
+          pointer.id = -1;
+          delete deckEl.dataset.grab;
+          if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+          return;
+        }
+        pointer.lock = "deck";
+        motion.drag = true;
+        motion.spring = false;
+        deckEl.dataset.grab = "move";
+      }
+      if (pointer.lock !== "deck") return;
       event.preventDefault();
-      const y = event.touches[0].clientY;
       const now = performance.now();
-      const delta = y - touchY;
-      motion.t -= delta / pixelsPerMember;
-      motion.speed += delta / pixelsPerMember;
-      touchVelocity = delta / Math.max(1, now - touchAt);
-      touchY = y;
-      touchAt = now;
+      const step = deck.step();
+      const dx = event.clientX - pointer.lastX;
+      const dy = event.clientY - pointer.lastY;
+      let members = 0;
+      if (phone) {
+        const span = Math.abs(step.x) > 24 ? step.x : (Math.sign(step.y) || 1) * -180;
+        members = dx / span;
+      } else {
+        const length = step.x * step.x + step.y * step.y || 1;
+        members = (dx * step.x + dy * step.y) / length;
+      }
+      motion.t += members;
+      const perSecond = members / (Math.max(8, now - pointer.lastAt) / 1000);
+      pointer.velocity = pointer.velocity * 0.55 + perSecond * 0.45;
+      motion.speed = Math.max(-0.4, Math.min(0.4, pointer.velocity * 0.08));
+      motion.swingTarget = reduced ? 0 : Math.max(-0.07, Math.min(0.07, -pointer.velocity * 0.012));
+      motion.c = motion.t;
+      pointer.lastX = event.clientX;
+      pointer.lastY = event.clientY;
+      pointer.lastAt = now;
       motion.last = now;
+      if (reduced) paint(now);
     };
-    const onTouchEnd = () => {
-      if (motion.intro) return;
+    const onPointerEnd = (event: PointerEvent) => {
+      if (!deckEl || (pointer.id !== -1 && event.pointerId !== pointer.id)) return;
+      const locked = pointer.lock;
+      pointer.id = -1;
+      pointer.lock = "";
+      delete deckEl.dataset.grab;
       motion.drag = false;
-      motion.t -= (touchVelocity * 40) / pixelsPerMember;
-      motion.speed += (touchVelocity * 40) / pixelsPerMember;
+      if (locked !== "deck") return;
+      const direction = Math.sign(pointer.velocity);
+      let goal = Math.round(motion.t);
+      if (Math.abs(pointer.velocity) > 0.85 && direction !== 0 && goal === Math.round(pointer.origin)) {
+        goal = Math.round(pointer.origin) + direction;
+      }
       motion.last = performance.now();
+      if (reduced) {
+        motion.t = goal;
+        motion.c = goal;
+        motion.speed = 0;
+        motion.swing = 0;
+        motion.swingTarget = 0;
+        motion.spring = false;
+        paint(performance.now());
+        return;
+      }
+      motion.spring = true;
+      motion.goal = goal;
+      motion.vel = Math.max(-5, Math.min(5, pointer.velocity));
     };
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "ArrowDown" && event.key !== "ArrowUp" && event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
@@ -376,9 +496,10 @@ export function ContactStage() {
     };
 
     window.addEventListener("wheel", onWheel, { capture: true, passive: false });
-    stage.addEventListener("touchstart", onTouchStart, { passive: true });
-    stage.addEventListener("touchmove", onTouchMove, { passive: false });
-    stage.addEventListener("touchend", onTouchEnd);
+    canvas?.addEventListener("pointerdown", onPointerDown);
+    canvas?.addEventListener("pointermove", onPointerMove);
+    canvas?.addEventListener("pointerup", onPointerEnd);
+    canvas?.addEventListener("pointercancel", onPointerEnd);
     window.addEventListener("keydown", onKey);
     stage.addEventListener("focusin", onFocus);
     window.addEventListener("resize", resize);
@@ -388,9 +509,11 @@ export function ContactStage() {
     return () => {
       cancelAnimationFrame(frame);
       window.removeEventListener("wheel", onWheel, { capture: true });
-      stage.removeEventListener("touchstart", onTouchStart);
-      stage.removeEventListener("touchmove", onTouchMove);
-      stage.removeEventListener("touchend", onTouchEnd);
+      canvas?.removeEventListener("pointerdown", onPointerDown);
+      canvas?.removeEventListener("pointermove", onPointerMove);
+      canvas?.removeEventListener("pointerup", onPointerEnd);
+      canvas?.removeEventListener("pointercancel", onPointerEnd);
+      delete deckEl?.dataset.grab;
       window.removeEventListener("keydown", onKey);
       stage.removeEventListener("focusin", onFocus);
       window.removeEventListener("resize", resize);

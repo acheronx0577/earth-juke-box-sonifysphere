@@ -153,6 +153,7 @@ export function pageGeometry(
   gap: number,
   focusAmount: number,
   view: DeckView,
+  swing = 0,
 ): PageGeometry {
   const scale = scaleFor(view);
   const base = -(index - (PAGE_COUNT - 1) * 0.5);
@@ -204,6 +205,24 @@ export function pageGeometry(
     }
   }
   const samples = (GRID_X + 1) * (GRID_Y + 1);
+  if (swing !== 0) {
+    let originX = 0;
+    let originY = 0;
+    for (let point = 0; point < xy.length; point += 2) {
+      originX += xy[point];
+      originY += xy[point + 1];
+    }
+    originX /= samples;
+    originY /= samples;
+    const cosine = Math.cos(swing);
+    const sine = Math.sin(swing);
+    for (let point = 0; point < xy.length; point += 2) {
+      const localX = xy[point] - originX;
+      const localY = xy[point + 1] - originY;
+      xy[point] = originX + localX * cosine - localY * sine;
+      xy[point + 1] = originY + localX * sine + localY * cosine;
+    }
+  }
   const boost: number = HERO_BOOST;
   const focusWeight = boost === 0 ? 0 : (hero - 1) / boost;
   return { xy, depth: depthSum / samples - focusWeight * 30, distance, flat: wrapped };

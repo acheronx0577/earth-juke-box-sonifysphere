@@ -11,14 +11,19 @@ import {
   PAGE_COUNT,
   PHONE_REST_GAP,
   pageGeometry,
+  scrollForMember,
   viewFor,
   type DeckView,
 } from "@/components/contact/deckMath";
 
 export interface DeckApi {
-  draw: (scroll: number, speed: number, gap: number, focus: number) => { x: number; y: number; member: number } | null;
+  draw: (scroll: number, speed: number, gap: number, focus: number, swing?: number) => { x: number; y: number; member: number } | null;
   resize: (width: number, height: number, phone: boolean) => void;
   restGap: () => number;
+  /** True when the point, in canvas CSS pixels, lands on a visible card. */
+  hit: (x: number, y: number) => boolean;
+  /** Screen travel of the focused card when the member index increases by one. */
+  step: () => { x: number; y: number };
 }
 
 interface ContactDeckProps {
@@ -75,6 +80,36 @@ function cardTexture(image: HTMLImageElement, phone: boolean): HTMLCanvasElement
   context.lineWidth = line;
   context.stroke();
   return canvas;
+}
+
+function contains(xy: Float32Array, x: number, y: number): boolean {
+  const columns = GRID_X + 1;
+  const ring: number[] = [];
+  for (let gx = 0; gx <= GRID_X; gx += 1) ring.push(gx);
+  for (let gy = 1; gy <= GRID_Y; gy += 1) ring.push(gy * columns + GRID_X);
+  for (let gx = GRID_X - 1; gx >= 0; gx -= 1) ring.push(GRID_Y * columns + gx);
+  for (let gy = GRID_Y - 1; gy >= 1; gy -= 1) ring.push(gy * columns);
+  let inside = false;
+  for (let index = 0, previous = ring.length - 1; index < ring.length; previous = index, index += 1) {
+    const x1 = xy[ring[index] * 2];
+    const y1 = xy[ring[index] * 2 + 1];
+    const x0 = xy[ring[previous] * 2];
+    const y0 = xy[ring[previous] * 2 + 1];
+    const crosses = (y0 > y) !== (y1 > y) && x < ((x1 - x0) * (y - y0)) / (y1 - y0) + x0;
+    if (crosses) inside = !inside;
+  }
+  return inside;
+}
+
+function centroid(xy: Float32Array): { x: number; y: number } {
+  let x = 0;
+  let y = 0;
+  const count = xy.length / 2 || 1;
+  for (let index = 0; index < xy.length; index += 2) {
+    x += xy[index];
+    y += xy[index + 1];
+  }
+  return { x: x / count, y: y / count };
 }
 
 function loadImage(src: string): Promise<HTMLImageElement> {
@@ -171,11 +206,14 @@ export function ContactDeck({ onReady }: ContactDeckProps) {
       renderer.setSize(view.width, view.height, false);
     };
 
-    const draw = (scroll: number, speed: number, gap: number, focus: number) => {
+    let shapes: { xy: Float32Array; distance: number }[] = [];
+
+    const draw = (scroll: number, speed: number, gap: number, focus: number, swing = 0) => {
       if (textures.length < CONTACT_COUNT) return null;
       const placed: { mesh: THREE.Mesh; depth: number; distance: number; member: number; xy: Float32Array }[] = [];
+      shapes = [];
       for (let i = 0; i < PAGE_COUNT; i += 1) {
-        const geometry = pageGeometry(i, scroll, speed, gap, focus, view);
+        const geometry = pageGeometry(i, scroll, speed, gap, focus, view, swing);
         let minX = Infinity;
         let maxX = -Infinity;
         let minY = Infinity;
@@ -208,6 +246,7 @@ export function ContactDeck({ onReady }: ContactDeckProps) {
         const shade = 1 - 0.34 * smoothstep(0.12, 0.9, geometry.distance) * Math.max(0, Math.min(1, focus));
         material.color.setScalar(shade);
         mesh.visible = true;
+        shapes.push({ xy: geometry.xy, distance: geometry.distance });
         placed.push({ mesh, depth: geometry.depth, distance: geometry.distance, member, xy: geometry.xy });
       }
       placed.sort((a, b) => b.depth - a.depth);
@@ -225,6 +264,14 @@ export function ContactDeck({ onReady }: ContactDeckProps) {
       draw,
       resize,
       restGap: () => (view.phone ? PHONE_REST_GAP : DESK_REST_GAP),
+      hit: (x, y) => shapes.some((shape) => shape.distance < 1.4 && contains(shape.xy, x, y)),
+      step: () => {
+        const gap = view.phone ? PHONE_REST_GAP : DESK_REST_GAP;
+        const at = (member: number) => centroid(pageGeometry(2, scrollForMember(member), 0, gap, 1, view).xy);
+        const from = at(2);
+        const to = at(3);
+        return { x: to.x - from.x, y: to.y - from.y };
+      },
     };
 
     void Promise.all(CONTACT_MEMBERS.map((member) => loadImage(member.image))).then((loaded) => {
